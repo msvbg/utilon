@@ -1,0 +1,26 @@
+[package]
+name = "utilon"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+bevy = "0.14"
+dashmap = "6"
+utilon_macros = { path = "../utilon_macros" }
+
+[lints.rust]
+unsafe_op_in_unsafe_fn = "warn"
+# TODO: enable this lint
+# missing_docs = "warn"
+unsafe_code = "deny"
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(docsrs_dep)'] }
+
+[package.metadata.docs.rs]
+# This cfg is needed so that #[doc(fake_variadic)] is correctly propagated for
+# impls for re-exported traits. See https://github.com/rust-lang/cargo/issues/8811
+# for details on why this is needed. Since dependencies don't expect to be built
+# with `--cfg docsrs` (and thus fail to compile) we use a different cfg.
+rustc-args = ["--cfg docsrs_dep"]
+rustdoc-args = ["-Zunstable-options", "--generate-link-to-definition"]
+all-features = true
+cargo-args = ["-Zunstable-options", "-Zrustdoc-scrape-examples"]
