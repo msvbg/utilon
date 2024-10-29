@@ -43,11 +43,13 @@ pub fn activity(attr: TokenStream, item: TokenStream) -> TokenStream {
                 bevy::prelude::IntoSystemConfigs::into_configs(#activity_name::<A, S>)
             }
 
+            #[inline]
             fn enter(ec: &mut bevy::ecs::system::EntityCommands) {
                 ec.insert(#name);
             }
 
-            fn leave(ec: &mut bevy::ecs::system::EntityCommands) {
+            #[inline]
+            fn exit(ec: &mut bevy::ecs::system::EntityCommands) {
                 ec.remove::<#name>();
             }
         }
@@ -84,13 +86,13 @@ pub fn impl_activity_seq(input: TokenStream) -> TokenStream {
     let enter = type_vars.iter().enumerate().map(|(i, ident)| {
         let i = i as u8;
         quote!(
-            #i => ec.insert(#ident::default())
+            #i => <#ident as Activity>::enter(ec)
         )
     });
     let exit = type_vars.iter().enumerate().map(|(i, ident)| {
         let i = i as u8;
         quote!(
-            #i => ec.remove::<#ident>()
+            #i => <#ident as Activity>::exit(ec)
         )
     });
 

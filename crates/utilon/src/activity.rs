@@ -9,7 +9,7 @@ pub trait Activity: Component + Default {
     fn init(world: &mut World);
     fn system<const A: ActivityId, S: ActivitySeq>() -> bevy::ecs::schedule::SystemConfigs;
     fn enter(ec: &mut EntityCommands);
-    fn leave(ec: &mut EntityCommands);
+    fn exit(ec: &mut EntityCommands);
 }
 
 pub type ActivityId = u8;
