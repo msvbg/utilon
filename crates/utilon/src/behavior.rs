@@ -3,6 +3,7 @@ use std::cmp::Ordering;
 use bevy::{
     ecs::schedule::{Chain, SystemConfigs},
     prelude::*,
+    reflect::{utility::GenericTypePathCell, TypePath},
     utils::NoOpHash,
 };
 use dashmap::DashMap;
@@ -38,6 +39,7 @@ impl UtilonAppExt for App {
     fn add_behavior<S: ActivitySeq>(&mut self, settings: BehaviorSettings) {
         let schedule = self.world().resource::<UtilonConfig>().schedule;
         S::init(self.world_mut());
+        self.register_type::<Behavior<S>>();
         self.add_systems(
             schedule,
             (
@@ -51,14 +53,29 @@ impl UtilonAppExt for App {
     }
 }
 
-#[derive(Component)]
+#[derive(Component, Reflect)]
+#[reflect(type_path = false)]
 pub struct Behavior<S: ActivitySeq> {
+    #[reflect(ignore)]
     scores: DashMap<ActivityId, (f32, u32), NoOpHash>,
     skip_remaining_scorers: bool,
     current_activity: ActivityState<ActivityId>,
     next_activity: Option<ActivityId>,
     now_millis: u32,
+    #[reflect(ignore)]
     _marker: std::marker::PhantomData<S>,
+}
+
+impl<S: ActivitySeq> TypePath for Behavior<S> {
+    fn type_path() -> &'static str {
+        static CELL: GenericTypePathCell = GenericTypePathCell::new();
+        CELL.get_or_insert::<Self, _>(|| format!("utilon::Behavior<{}>", S::type_path()))
+    }
+
+    fn short_type_path() -> &'static str {
+        static CELL: GenericTypePathCell = GenericTypePathCell::new();
+        CELL.get_or_insert::<Self, _>(|| format!("utilon::Behavior<{}>", S::short_type_path()))
+    }
 }
 
 impl<S: ActivitySeq> Default for Behavior<S> {
@@ -122,7 +139,7 @@ fn prepare_behaviors<S: ActivitySeq>(mut behaviors: Query<&mut Behavior<S>>, tim
     }
 }
 
-#[derive(Default, Debug, PartialEq, Eq, Clone)]
+#[derive(Default, Debug, PartialEq, Eq, Clone, Reflect)]
 pub enum ActivityState<A> {
     #[default]
     None,
@@ -261,7 +278,7 @@ mod tests {
     #[derive(Component)]
     struct InputA(f32);
 
-    #[derive(Component, Default)]
+    #[derive(Component, Default, Reflect)]
     #[activity(always_09)]
     struct Activity09;
 
@@ -271,11 +288,11 @@ mod tests {
         }
     }
 
-    #[derive(Component, Default)]
+    #[derive(Component, Default, Reflect)]
     #[activity(always_one)]
     struct Activity1;
 
-    #[derive(Component, Default)]
+    #[derive(Component, Default, Reflect)]
     #[activity(always_nan)]
     struct ActivityNan;
 
@@ -285,7 +302,7 @@ mod tests {
         }
     }
 
-    #[derive(Component, Default)]
+    #[derive(Component, Default, Reflect)]
     #[activity(always_panic)]
     struct ActivityPanic;
 
@@ -295,7 +312,7 @@ mod tests {
         }
     }
 
-    #[derive(Component, Default)]
+    #[derive(Component, Default, Reflect)]
     #[activity(identity)]
     struct ActivityIdentity;
 

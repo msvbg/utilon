@@ -95,6 +95,20 @@ pub fn impl_activity_seq(input: TokenStream) -> TokenStream {
             #i => <#ident as Activity>::exit(ec)
         )
     });
+    let type_path_format = format!(
+        "({})",
+        type_vars
+            .iter()
+            .map(|_| "{}".to_string())
+            .reduce(|a, b| format!("{},{}", a, b))
+            .unwrap()
+    );
+    let type_path = type_vars
+        .iter()
+        .map(|ident| quote!(<#ident as bevy::reflect::TypePath>::type_path()));
+    let short_type_path = type_vars
+        .iter()
+        .map(|ident| quote!(<#ident as bevy::reflect::TypePath>::short_type_path()));
 
     let imp = quote!(
         impl<#(#type_vars),*> ActivitySeq for (#(#type_vars),*,)
@@ -123,6 +137,18 @@ pub fn impl_activity_seq(input: TokenStream) -> TokenStream {
                     #(#exit),*,
                     _ => unreachable!("Invalid activity id")
                 };
+            }
+
+            fn type_path() -> &'static str {
+                use bevy::reflect::utility::GenericTypePathCell;
+                static CELL: GenericTypePathCell = GenericTypePathCell::new();
+                CELL.get_or_insert::<Self, _>(|| format!(#type_path_format, #(#type_path),*))
+            }
+
+            fn short_type_path() -> &'static str {
+                use bevy::reflect::utility::GenericTypePathCell;
+                static CELL: GenericTypePathCell = GenericTypePathCell::new();
+                CELL.get_or_insert::<Self, _>(|| format!(#type_path_format, #(#short_type_path),*))
             }
         }
     );

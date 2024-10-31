@@ -5,7 +5,7 @@ use bevy::{
 };
 use utilon_macros::impl_activity_seq;
 
-pub trait Activity: Component + Default {
+pub trait Activity: TypePath + Component + Default {
     fn init(world: &mut World);
     fn system<const A: ActivityId, S: ActivitySeq>() -> bevy::ecs::schedule::SystemConfigs;
     fn enter(ec: &mut EntityCommands);
@@ -22,6 +22,8 @@ pub trait ActivitySeq: Send + Sync + 'static {
     fn into_activity_list() -> ActivityList;
     fn enter(index: ActivityId, ec: &mut EntityCommands);
     fn exit(index: ActivityId, ec: &mut EntityCommands);
+    fn type_path() -> &'static str;
+    fn short_type_path() -> &'static str;
 }
 
 all_tuples!(impl_activity_seq, 1, 20, S);
@@ -34,7 +36,7 @@ mod tests {
 
     use super::*;
 
-    #[derive(Component, Default)]
+    #[derive(Component, Default, Reflect)]
     #[activity(s)]
     struct Test;
 
