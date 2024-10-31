@@ -11,12 +11,13 @@ use bevy::{
 
 mod activity;
 mod behavior;
+pub mod scorers;
 
 pub mod prelude {
     pub use crate::{
         activity::{Activity, ActivityId, ActivitySeq},
         behavior::{ActivityState, Behavior, BehaviorSettings, Policy, UtilonAppExt},
-        UtilonPlugin,
+        StateMode, UtilonConfig, UtilonPlugin,
     };
 
     pub use utilon_macros::activity;

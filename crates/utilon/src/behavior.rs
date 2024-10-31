@@ -256,7 +256,7 @@ mod tests {
 
     use bevy::prelude::*;
 
-    use crate::prelude::*;
+    use crate::{prelude::*, scorers::always_one};
 
     #[derive(Component)]
     struct InputA(f32);
@@ -274,12 +274,6 @@ mod tests {
     #[derive(Component, Default)]
     #[activity(always_one)]
     struct Activity1;
-
-    fn always_one<const A: ActivityId, S: ActivitySeq>(query: Query<&Behavior<S>>) {
-        for behavior in query.iter() {
-            behavior.score::<A>(|| 1.0);
-        }
-    }
 
     #[derive(Component, Default)]
     #[activity(always_nan)]
