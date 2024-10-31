@@ -52,7 +52,7 @@ impl UtilonAppExt for App {
 }
 
 #[derive(Component)]
-pub struct Behavior<S> {
+pub struct Behavior<S: ActivitySeq> {
     scores: DashMap<ActivityId, (f32, u32), NoOpHash>,
     skip_remaining_scorers: bool,
     current_activity: ActivityState<ActivityId>,
@@ -61,7 +61,7 @@ pub struct Behavior<S> {
     _marker: std::marker::PhantomData<S>,
 }
 
-impl<S> Default for Behavior<S> {
+impl<S: ActivitySeq> Default for Behavior<S> {
     fn default() -> Self {
         Self {
             scores: DashMap::with_hasher(NoOpHash),
@@ -74,7 +74,7 @@ impl<S> Default for Behavior<S> {
     }
 }
 
-impl<S> Behavior<S> {
+impl<S: ActivitySeq> Behavior<S> {
     #[inline]
     pub fn score<const A: ActivityId>(&self, mut score: impl FnMut() -> f32) {
         if self.skip_remaining_scorers {
