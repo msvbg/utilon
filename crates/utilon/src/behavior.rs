@@ -4,7 +4,6 @@ use bevy::{
     ecs::schedule::{Chain, SystemConfigs},
     prelude::*,
     reflect::{utility::GenericTypePathCell, TypePath},
-    utils::NoOpHash,
 };
 use dashmap::DashMap;
 
@@ -57,7 +56,7 @@ impl UtilonAppExt for App {
 #[reflect(type_path = false)]
 pub struct Behavior<S: ActivitySeq> {
     #[reflect(ignore)]
-    scores: DashMap<ActivityId, (f32, u32), NoOpHash>,
+    scores: DashMap<ActivityId, (f32, u32)>,
     skip_remaining_scorers: bool,
     current_activity: ActivityState<ActivityId>,
     next_activity: Option<ActivityId>,
@@ -81,7 +80,7 @@ impl<S: ActivitySeq> TypePath for Behavior<S> {
 impl<S: ActivitySeq> Default for Behavior<S> {
     fn default() -> Self {
         Self {
-            scores: DashMap::with_hasher(NoOpHash),
+            scores: DashMap::default(),
             skip_remaining_scorers: false,
             current_activity: Default::default(),
             next_activity: Default::default(),
