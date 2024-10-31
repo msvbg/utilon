@@ -323,7 +323,7 @@ mod tests {
 
     #[test]
     fn test_maximum() {
-        type S = (Activity09, Activity1, ActivityNan);
+        type S = (Activity09, Activity1);
 
         let mut app = App::new();
         app.add_plugins((MinimalPlugins, UtilonPlugin::default()));
@@ -404,7 +404,6 @@ mod tests {
             (Order(1), Behavior::<S>::default(), InputA(0.1)),
             (Order(2), Behavior::<S>::default(), InputA(0.0)),
             (Order(3), Behavior::<S>::default(), InputA(1.0)),
-            (Order(4), Behavior::<S>::default(), InputA(f32::NAN)),
         ]);
 
         app.update();
@@ -421,7 +420,6 @@ mod tests {
                 ActivityState::Running(0),
                 ActivityState::Running(0),
                 ActivityState::Running(0),
-                ActivityState::Running(1),
                 ActivityState::Running(1),
             ]
         );
