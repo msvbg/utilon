@@ -5,8 +5,8 @@ edition = "2021"
 
 [dependencies]
 bevy = "0.14"
-dashmap = "6"
 utilon_macros = { path = "../utilon_macros" }
+atomic_float = "1.1"
 
 [lints.rust]
 unsafe_op_in_unsafe_fn = "warn"

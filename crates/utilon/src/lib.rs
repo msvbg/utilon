@@ -11,12 +11,14 @@ use bevy::{
 
 mod activity;
 mod behavior;
+mod response;
 pub mod scorers;
 
 pub mod prelude {
     pub use crate::{
         activity::{Activity, ActivityId, ActivitySeq},
         behavior::{ActivityState, Behavior, BehaviorSettings, Policy, UtilonAppExt},
+        response::ResponseCurve,
         StateMode, UtilonConfig, UtilonPlugin,
     };
 
@@ -44,12 +46,6 @@ impl Default for UtilonPlugin {
     }
 }
 
-#[derive(SystemSet, Debug, Hash, PartialEq, Eq, Clone)]
-pub struct ScoringSet;
-
-#[derive(SystemSet, Debug, Hash, PartialEq, Eq, Clone)]
-pub struct TransitionSet;
-
 pub struct UtilonPlugin(pub UtilonConfig);
 
 impl Plugin for UtilonPlugin {
@@ -58,9 +54,7 @@ impl Plugin for UtilonPlugin {
         app.insert_resource(config.clone());
 
         match config.state_mode {
-            StateMode::Realtime => {
-                app.configure_sets(config.schedule, (ScoringSet, TransitionSet).chain());
-            }
+            StateMode::Realtime => {}
             StateMode::Manual => todo!(),
         }
     }

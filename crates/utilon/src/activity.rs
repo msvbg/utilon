@@ -24,6 +24,7 @@ pub trait ActivitySeq: Send + Sync + 'static {
     fn exit(index: ActivityId, ec: &mut EntityCommands);
     fn type_path() -> &'static str;
     fn short_type_path() -> &'static str;
+    fn count() -> usize;
 }
 
 all_tuples!(impl_activity_seq, 1, 20, S);

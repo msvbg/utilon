@@ -109,6 +109,7 @@ pub fn impl_activity_seq(input: TokenStream) -> TokenStream {
     let short_type_path = type_vars
         .iter()
         .map(|ident| quote!(<#ident as bevy::reflect::TypePath>::short_type_path()));
+    let count = type_vars.len();
 
     let imp = quote!(
         impl<#(#type_vars),*> ActivitySeq for (#(#type_vars),*,)
@@ -149,6 +150,10 @@ pub fn impl_activity_seq(input: TokenStream) -> TokenStream {
                 use bevy::reflect::utility::GenericTypePathCell;
                 static CELL: GenericTypePathCell = GenericTypePathCell::new();
                 CELL.get_or_insert::<Self, _>(|| format!(#type_path_format, #(#short_type_path),*))
+            }
+
+            fn count() -> usize {
+                #count
             }
         }
     );
