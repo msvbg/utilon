@@ -13,4 +13,4 @@ Utilon is a utility AI library for Bevy. It takes inspiration from [big_brain](h
 - Scores can be cached automatically.
 - Scorers depend only on their component inputs and never on each other, avoiding all issues relating to hierarchy and order of operations.
 - State transitions are implemented automatically, and can optionally be hooked into if needed.
-- Behaviors are registered statically using the Bevy scheduler. This means that behavior scheduling is not dynamically configurable.
+- Behaviors support both static and dynamic configuration. Response curves can be tweaked at runtime.

@@ -1,3 +1,7 @@
-[workspace]
-resolver = "2"
-members = ["crates/*"]
+[package]
+name = "utilon"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+bevy = "0.14"
