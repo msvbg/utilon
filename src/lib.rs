@@ -1,14 +1,11 @@
-// wanted improvements over the last revision:
-// - better dynamic configuration
-// - less quirky api
-// - better support for dynamic tweaking of response curves
-
 use std::{any::TypeId, sync::Arc};
 
 use bevy::{
     ecs::{
         component::ComponentId,
+        intern::Interned,
         reflect::ReflectCommandExt,
+        schedule::ScheduleLabel,
         system::{EntityCommand, EntityCommands},
     },
     prelude::*,
@@ -68,6 +65,8 @@ impl<A: Activity> Score<A> {
 
 pub trait Activity: Default + Component + Reflect + GetTypeRegistration + TypePath {}
 
+impl<A> Activity for A where A: Default + Component + Reflect + GetTypeRegistration + TypePath {}
+
 #[derive(Debug, Component, Default)]
 struct Behavior {
     activities: Vec<ActivityId>,
@@ -122,19 +121,28 @@ fn pick_maximum(mut query: Query<EntityMut, With<Behavior>>) {
     }
 }
 
-pub struct UtilonPlugin;
+pub struct UtilonPlugin {
+    schedule: Interned<dyn ScheduleLabel>,
+}
+
+impl Default for UtilonPlugin {
+    fn default() -> Self {
+        Self {
+            schedule: PostUpdate.intern(),
+        }
+    }
+}
 
 impl Plugin for UtilonPlugin {
     fn build(&self, app: &mut App) {
         app.add_systems(
-            Update,
+            self.schedule,
             (pick_maximum, transition_activity_states).chain_ignore_deferred(),
         );
     }
 }
 
 pub struct BehaviorBuilder {
-    policy: SelectionPolicy,
     activities: Vec<ActivityDescriptor>,
 }
 
@@ -148,9 +156,8 @@ struct ActivityDescriptor {
 }
 
 impl BehaviorBuilder {
-    pub fn maximum_policy() -> Self {
+    pub fn new() -> Self {
         BehaviorBuilder {
-            policy: SelectionPolicy::Maximum,
             activities: Default::default(),
         }
     }
@@ -291,8 +298,6 @@ mod tests {
     #[reflect(Component)] // todo: remove for bevy 0.15
     struct Idle;
 
-    impl Activity for Idle {}
-
     fn score_idle(mut query: Query<&mut Score<Idle>>) {
         for mut scorer in query.iter_mut() {
             scorer.score(|| 0.0);
@@ -302,8 +307,6 @@ mod tests {
     #[derive(Component, Reflect, Default)]
     #[reflect(Component)] // todo: remove for bevy 0.15
     struct Pursue;
-
-    impl Activity for Pursue {}
 
     fn score_pursue(mut query: Query<&mut Score<Pursue>>) {
         for mut scorer in query.iter_mut() {
@@ -339,10 +342,10 @@ mod tests {
     #[test]
     fn basic_state_transition() {
         let mut app = App::new();
-        app.add_plugins((MinimalPlugins, UtilonPlugin));
+        app.add_plugins((MinimalPlugins, UtilonPlugin::default()));
         app.add_systems(Update, (score_idle, score_pursue));
         app.world_mut().commands().spawn_empty().insert_behavior(
-            BehaviorBuilder::maximum_policy()
+            BehaviorBuilder::new()
                 .with_activity::<Idle>(Response::Identity)
                 .with_activity::<Pursue>(Response::Identity),
         );
