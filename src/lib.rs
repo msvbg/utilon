@@ -1,3 +1,5 @@
+use std::fmt::Debug;
+use std::hash::Hash;
 use std::{any::TypeId, sync::Arc};
 
 use bevy::{
@@ -15,25 +17,29 @@ use response::Response;
 
 mod response;
 
+pub mod prelude {
+    pub use crate::{
+        response::Response, Activity, BehaviorBuilder, InsertBehavior, Score, UtilonPlugin,
+    };
+}
+
 #[repr(C)]
 #[derive(Component, Reflect)]
 #[reflect(Component, Default)]
 pub struct Score<A: Activity> {
-    score: f32,
-    ttl_millis: u32,
+    #[reflect(ignore)]
+    scores: Vec<(Box<dyn Reflect>, f32)>,
     response: Response,
 
     #[reflect(ignore)]
     _marker: std::marker::PhantomData<A>,
 }
 
-impl<A: Activity> std::fmt::Debug for Score<A> {
+impl<A: Activity + Debug> std::fmt::Debug for Score<A> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Score")
-            .field("score", &self.score)
-            .field("ttl_millis", &self.ttl_millis)
+            .field("scores", &self.scores)
             .field("response_curve", &self.response)
-            .field("_marker", &self._marker)
             .finish()
     }
 }
@@ -41,42 +47,41 @@ impl<A: Activity> std::fmt::Debug for Score<A> {
 #[derive(Reflect)]
 #[repr(C)]
 struct UntypedScore {
-    score: f32,
-    ttl_millis: u32,
-    response_curve: Response,
+    #[reflect(ignore)]
+    scores: Vec<(Box<dyn Reflect>, f32)>,
+    response: Response,
 }
 
 impl<A: Activity> Default for Score<A> {
     fn default() -> Self {
         Self {
-            score: Default::default(),
-            ttl_millis: 0,
+            scores: Default::default(),
             response: Response::Identity,
-            _marker: Default::default(),
+            _marker: std::marker::PhantomData::<A>,
         }
     }
 }
 
 impl<A: Activity> Score<A> {
-    pub fn score(&mut self, mut score: impl FnMut() -> f32) {
-        self.score = score();
+    pub fn score(&mut self, activity: A, mut score: impl FnMut() -> f32) {
+        self.scores.push((Box::new(activity), score()));
     }
 }
 
-pub trait Activity: Default + Component + Reflect + GetTypeRegistration + TypePath {}
+pub trait Activity: Default + Component + Reflect + GetTypeRegistration + TypePath + Hash {}
 
-impl<A> Activity for A where A: Default + Component + Reflect + GetTypeRegistration + TypePath {}
+impl<A> Activity for A where A: Default + Component + Reflect + GetTypeRegistration + TypePath + Hash
+{}
 
 #[derive(Debug, Component, Default)]
 struct Behavior {
     activities: Vec<ActivityId>,
-    current_activity: ActivityState<ActivityId>,
-    next_activity: Option<ActivityId>,
+    current_activity: ActivityState<Box<dyn Reflect>>,
+    next_activity: Option<Box<dyn Reflect>>,
 }
 
 #[derive(Clone, Debug)]
 struct ActivityId {
-    activity_default: Arc<dyn Reflect>,
     activity_cid: ComponentId,
     score_cid: ComponentId,
 }
@@ -84,16 +89,6 @@ struct ActivityId {
 impl PartialEq for ActivityId {
     fn eq(&self, other: &Self) -> bool {
         self.activity_cid == other.activity_cid && self.score_cid == other.score_cid
-    }
-}
-
-impl ActivityId {
-    fn enter(&self, ec: &mut EntityCommands) {
-        ec.insert_reflect(self.activity_default.clone_value());
-    }
-
-    fn exit(&self, ec: &mut EntityCommands) {
-        ec.remove_by_id(self.activity_cid);
     }
 }
 
@@ -109,10 +104,16 @@ fn pick_maximum(mut query: Query<EntityMut, With<Behavior>>) {
             };
             // SAFETY: Score<_> has the same layout as UntypedScore
             let untyped_score = unsafe { score_ptr.deref::<UntypedScore>() };
-            let score = untyped_score.response_curve.eval(untyped_score.score);
-            if score > max {
-                max_activity = Some(activity.clone());
-                max = score;
+            let score = untyped_score
+                .scores
+                .iter()
+                .map(|(a, s)| (a, untyped_score.response.eval(*s)))
+                .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap());
+            if let Some(score) = score {
+                if score.1 > max {
+                    max_activity = Some(score.0.clone_value());
+                    max = score.1;
+                }
             }
         }
 
@@ -122,7 +123,7 @@ fn pick_maximum(mut query: Query<EntityMut, With<Behavior>>) {
 }
 
 pub struct UtilonPlugin {
-    schedule: Interned<dyn ScheduleLabel>,
+    pub schedule: Interned<dyn ScheduleLabel>,
 }
 
 impl Default for UtilonPlugin {
@@ -180,12 +181,6 @@ impl BehaviorBuilder {
     }
 }
 
-#[derive(Default)]
-enum SelectionPolicy {
-    #[default]
-    Maximum,
-}
-
 pub trait InsertBehavior {
     fn insert_behavior(&mut self, behavior: BehaviorBuilder);
 }
@@ -231,7 +226,6 @@ impl EntityCommand for BuildBehaviorCommand {
             world.commands().entity(id).remove_by_id(activity_cid);
 
             behavior.activities.push(ActivityId {
-                activity_default: desc.make_activity.as_ref()(),
                 activity_cid: activity_cid,
                 score_cid: world.components().get_id(desc.score_type_id).unwrap(),
             });
@@ -267,20 +261,28 @@ fn transition_activity_states(
         if let Some(next_activity) = &behavior.next_activity {
             if let ActivityState::Running(current) = &behavior.current_activity {
                 commands.trigger_targets(OnCanceled, entity);
-                current.exit(&mut commands.entity(entity));
+                commands
+                    .entity(entity)
+                    .remove_reflect(current.reflect_type_path().to_owned());
             }
-            next_activity.enter(&mut commands.entity(entity));
-            behavior.current_activity = ActivityState::Running(next_activity.clone());
+            commands
+                .entity(entity)
+                .insert_reflect(next_activity.clone_value());
+            behavior.current_activity = ActivityState::Running(next_activity.clone_value());
             behavior.next_activity = None;
         } else {
             match &behavior.current_activity {
                 ActivityState::Success(current) => {
-                    current.exit(&mut commands.entity(entity));
+                    commands
+                        .entity(entity)
+                        .remove_reflect(current.reflect_type_path().to_owned());
                     behavior.current_activity = ActivityState::None;
                     commands.trigger_targets(OnSuccess, entity);
                 }
                 ActivityState::Failure(current) => {
-                    current.exit(&mut commands.entity(entity));
+                    commands
+                        .entity(entity)
+                        .remove_reflect(current.reflect_type_path().to_owned());
                     behavior.current_activity = ActivityState::None;
                     commands.trigger_targets(OnFailure, entity);
                 }
@@ -292,25 +294,26 @@ fn transition_activity_states(
 
 #[cfg(test)]
 mod tests {
+
     use super::*;
 
-    #[derive(Component, Reflect, Default)]
+    #[derive(Component, Reflect, Default, Hash, Debug)]
     #[reflect(Component)] // todo: remove for bevy 0.15
     struct Idle;
 
     fn score_idle(mut query: Query<&mut Score<Idle>>) {
         for mut scorer in query.iter_mut() {
-            scorer.score(|| 0.0);
+            scorer.score(Idle, || 0.0);
         }
     }
 
-    #[derive(Component, Reflect, Default)]
+    #[derive(Component, Reflect, Default, Hash, Debug)]
     #[reflect(Component)] // todo: remove for bevy 0.15
     struct Pursue;
 
     fn score_pursue(mut query: Query<&mut Score<Pursue>>) {
         for mut scorer in query.iter_mut() {
-            scorer.score(|| 1.0);
+            scorer.score(Pursue, || 1.0);
         }
     }
 
@@ -320,8 +323,7 @@ mod tests {
         assert_eq!(align_of::<UntypedScore>(), align_of::<Score<Idle>>());
 
         let score = Score {
-            score: 42.0,
-            ttl_millis: 123,
+            scores: vec![(Box::new(Idle), 42.0), (Box::new(Idle), 13.0)],
             response: Response::Sigmoid {
                 steepness: 2.0,
                 center: 3.0,
@@ -334,9 +336,11 @@ mod tests {
                 .as_ref()
                 .unwrap()
         };
-        assert_eq!(untyped.score, score.score);
-        assert_eq!(untyped.ttl_millis, score.ttl_millis);
-        assert_eq!(untyped.response_curve, score.response);
+        assert_eq!(
+            untyped.scores.iter().map(|(_, s)| *s).collect::<Vec<_>>(),
+            score.scores.iter().map(|(_, s)| *s).collect::<Vec<_>>()
+        );
+        assert_eq!(untyped.response, score.response);
     }
 
     #[test]
@@ -360,14 +364,9 @@ mod tests {
         w.query::<(&Behavior, &Score<Idle>, &Score<Pursue>, &Pursue)>()
             .single(&w);
 
-        assert_eq!(w.query::<&Behavior>().single(&w).next_activity, None);
         assert_eq!(
-            w.query::<&Behavior>().single(&w).current_activity.clone(),
-            ActivityState::Running(ActivityId {
-                activity_default: Arc::new(Pursue::default()),
-                activity_cid: w.init_component::<Pursue>(),
-                score_cid: w.init_component::<Score<Pursue>>()
-            })
+            w.query::<&Behavior>().single(&w).next_activity.is_none(),
+            true
         );
     }
 }
