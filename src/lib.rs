@@ -19,7 +19,8 @@ mod response;
 
 pub mod prelude {
     pub use crate::{
-        response::Response, Activity, BehaviorBuilder, InsertBehavior, Score, UtilonPlugin,
+        response::Response, Activity, Behavior, BehaviorBuilder, InsertBehavior, Score,
+        UtilonPlugin,
     };
 }
 
@@ -74,7 +75,7 @@ impl<A> Activity for A where A: Default + Component + Reflect + GetTypeRegistrat
 {}
 
 #[derive(Debug, Component, Default)]
-struct Behavior {
+pub struct Behavior {
     activities: Vec<ActivityId>,
     current_activity: ActivityState<Box<dyn Reflect>>,
     next_activity: Option<Box<dyn Reflect>>,
@@ -117,27 +118,41 @@ fn pick_maximum(mut query: Query<EntityMut, With<Behavior>>) {
             }
         }
 
-        let mut behavior = entity.get_mut::<Behavior>().unwrap();
-        behavior.next_activity = max_activity;
+        if let Some(max_activity) = max_activity {
+            let mut behavior = entity.get_mut::<Behavior>().unwrap();
+            if let ActivityState::Running(current_activity) = &behavior.current_activity {
+                if !matches!(
+                    current_activity.reflect_partial_eq(max_activity.as_ref()),
+                    Some(true)
+                ) {
+                    behavior.next_activity = Some(max_activity);
+                }
+            } else {
+                behavior.next_activity = Some(max_activity);
+            }
+        }
     }
 }
 
 pub struct UtilonPlugin {
-    pub schedule: Interned<dyn ScheduleLabel>,
+    pub before_schedule: Interned<dyn ScheduleLabel>,
+    pub after_schedule: Interned<dyn ScheduleLabel>,
 }
 
 impl Default for UtilonPlugin {
     fn default() -> Self {
         Self {
-            schedule: PostUpdate.intern(),
+            before_schedule: PreUpdate.intern(),
+            after_schedule: PostUpdate.intern(),
         }
     }
 }
 
 impl Plugin for UtilonPlugin {
     fn build(&self, app: &mut App) {
+        app.add_systems(self.before_schedule, prepare_behaviors);
         app.add_systems(
-            self.schedule,
+            self.after_schedule,
             (pick_maximum, transition_activity_states).chain_ignore_deferred(),
         );
     }
@@ -260,14 +275,22 @@ fn transition_activity_states(
     for (entity, mut behavior) in behaviors.iter_mut() {
         if let Some(next_activity) = &behavior.next_activity {
             if let ActivityState::Running(current) = &behavior.current_activity {
+                let removed = current
+                    .get_represented_type_info()
+                    .map(|t| t.type_path())
+                    .unwrap();
                 commands.trigger_targets(OnCanceled, entity);
-                commands
-                    .entity(entity)
-                    .remove_reflect(current.reflect_type_path().to_owned());
+                commands.entity(entity).remove_reflect(removed);
+
+                debug!("Removed activity {:?} from entity {:?}", removed, entity);
             }
             commands
                 .entity(entity)
                 .insert_reflect(next_activity.clone_value());
+            debug!(
+                "Inserted activity {:?} into entity {:?}",
+                next_activity, entity
+            );
             behavior.current_activity = ActivityState::Running(next_activity.clone_value());
             behavior.next_activity = None;
         } else {
@@ -288,6 +311,22 @@ fn transition_activity_states(
                 }
                 ActivityState::Running(_) | ActivityState::None => {}
             }
+        }
+    }
+}
+
+fn prepare_behaviors(mut behaviors: Query<EntityMut, With<Behavior>>) {
+    for mut entity in behaviors.iter_mut() {
+        let behavior = entity.get::<Behavior>().unwrap();
+        let score_cids = behavior
+            .activities
+            .iter()
+            .map(|a| a.score_cid)
+            .collect::<Vec<_>>();
+        for score_cid in score_cids.iter() {
+            let score = entity.get_mut_by_id(*score_cid).unwrap().into_inner();
+            let untyped_score = unsafe { score.deref_mut::<UntypedScore>() };
+            untyped_score.scores = vec![];
         }
     }
 }
