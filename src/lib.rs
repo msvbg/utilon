@@ -2,6 +2,7 @@ use std::fmt::Debug;
 use std::hash::Hash;
 use std::{any::TypeId, sync::Arc};
 
+use bevy::reflect::{FromType, ReflectFromPtr};
 use bevy::{
     ecs::{
         component::ComponentId,
@@ -19,14 +20,14 @@ mod response;
 
 pub mod prelude {
     pub use crate::{
-        response::Response, Activity, Behavior, BehaviorBuilder, InsertBehavior, Score,
-        UtilonPlugin,
+        response::Response, Activity, Behavior, BehaviorBuilder, InsertBehavior, PrepareSet, Score,
+        ScoreSet, TransitionSet, UtilonPlugin,
     };
 }
 
 #[repr(C)]
 #[derive(Component, Reflect)]
-#[reflect(Component, Default)]
+#[reflect(Component, Default, Score)]
 pub struct Score<A: Activity> {
     #[reflect(ignore)]
     scores: Vec<(Box<dyn Reflect>, f32)>,
@@ -42,6 +43,34 @@ impl<A: Activity + Debug> std::fmt::Debug for Score<A> {
             .field("scores", &self.scores)
             .field("response_curve", &self.response)
             .finish()
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct ReflectScore {
+    max_score: for<'a> fn(value: &'a dyn Reflect) -> Option<(Box<dyn Reflect>, f32)>,
+    reset_activity: for<'a> fn(value: &'a mut dyn Reflect),
+}
+
+impl<A: Activity> FromType<Score<A>> for ReflectScore {
+    fn from_type() -> Self {
+        ReflectScore {
+            max_score: |value| {
+                value.downcast_ref::<Score<A>>().and_then(|activity| {
+                    activity
+                        .scores
+                        .iter()
+                        .map(|(a, s)| (a, activity.response.eval(*s)))
+                        .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap())
+                        .map(|(a, s)| (a.clone_value(), s))
+                })
+            },
+            reset_activity: |value| {
+                value
+                    .downcast_mut::<Score<A>>()
+                    .map(|activity| activity.scores.clear());
+            },
+        }
     }
 }
 
@@ -85,6 +114,7 @@ pub struct Behavior {
 struct ActivityId {
     activity_cid: ComponentId,
     score_cid: ComponentId,
+    score_type_id: TypeId,
 }
 
 impl PartialEq for ActivityId {
@@ -93,8 +123,12 @@ impl PartialEq for ActivityId {
     }
 }
 
-fn pick_maximum(mut query: Query<EntityMut, With<Behavior>>) {
-    for mut entity in query.iter_mut() {
+fn pick_maximum(mut world: &mut World) {
+    let mut query = world.query_filtered::<EntityMut, With<Behavior>>();
+    let type_registry = world.resource::<AppTypeRegistry>().clone();
+    let type_reg = type_registry.read();
+
+    for mut entity in query.iter_mut(&mut world) {
         let behavior = entity.get::<Behavior>().unwrap();
         let mut max = f32::NEG_INFINITY;
         let mut max_activity = None;
@@ -103,13 +137,12 @@ fn pick_maximum(mut query: Query<EntityMut, With<Behavior>>) {
                 warn!("Activity {:?} has no Score", activity.score_cid);
                 continue;
             };
-            // SAFETY: Score<_> has the same layout as UntypedScore
-            let untyped_score = unsafe { score_ptr.deref::<UntypedScore>() };
-            let score = untyped_score
-                .scores
-                .iter()
-                .map(|(a, s)| (a, untyped_score.response.eval(*s)))
-                .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap());
+            let score_type = type_reg.get(activity.score_type_id).unwrap();
+            let reflect_score = score_type.data::<ReflectScore>().unwrap();
+            let reflect_from_ptr = score_type.data::<ReflectFromPtr>().unwrap();
+            let reflect = unsafe { reflect_from_ptr.as_reflect(score_ptr) };
+
+            let score = (reflect_score.max_score)(reflect);
             if let Some(score) = score {
                 if score.1 > max {
                     max_activity = Some(score.0.clone_value());
@@ -135,25 +168,35 @@ fn pick_maximum(mut query: Query<EntityMut, With<Behavior>>) {
 }
 
 pub struct UtilonPlugin {
-    pub before_schedule: Interned<dyn ScheduleLabel>,
-    pub after_schedule: Interned<dyn ScheduleLabel>,
+    pub schedule: Interned<dyn ScheduleLabel>,
 }
 
 impl Default for UtilonPlugin {
     fn default() -> Self {
         Self {
-            before_schedule: PreUpdate.intern(),
-            after_schedule: PostUpdate.intern(),
+            schedule: PostUpdate.intern(),
         }
     }
 }
 
+#[derive(SystemSet, Debug, Hash, PartialEq, Eq, Clone, Copy)]
+pub struct PrepareSet;
+
+#[derive(SystemSet, Debug, Hash, PartialEq, Eq, Clone, Copy)]
+pub struct ScoreSet;
+
+#[derive(SystemSet, Debug, Hash, PartialEq, Eq, Clone, Copy)]
+pub struct TransitionSet;
+
 impl Plugin for UtilonPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(self.before_schedule, prepare_behaviors);
+        app.configure_sets(self.schedule, (PrepareSet, ScoreSet, TransitionSet));
+        app.add_systems(self.schedule, prepare_behaviors.in_set(PrepareSet));
         app.add_systems(
-            self.after_schedule,
-            (pick_maximum, transition_activity_states).chain_ignore_deferred(),
+            self.schedule,
+            (pick_maximum, transition_activity_states)
+                .chain_ignore_deferred()
+                .in_set(TransitionSet),
         );
     }
 }
@@ -243,6 +286,7 @@ impl EntityCommand for BuildBehaviorCommand {
             behavior.activities.push(ActivityId {
                 activity_cid: activity_cid,
                 score_cid: world.components().get_id(desc.score_type_id).unwrap(),
+                score_type_id: desc.score_type_id,
             });
         }
 
@@ -315,18 +359,29 @@ fn transition_activity_states(
     }
 }
 
-fn prepare_behaviors(mut behaviors: Query<EntityMut, With<Behavior>>) {
-    for mut entity in behaviors.iter_mut() {
-        let behavior = entity.get::<Behavior>().unwrap();
-        let score_cids = behavior
+fn prepare_behaviors(mut world: &mut World) {
+    let mut behaviors = world.query_filtered::<EntityMut, With<Behavior>>();
+    let type_registry = world.resource::<AppTypeRegistry>().clone();
+    let type_reg = type_registry.read();
+
+    for mut entity in behaviors.iter_mut(&mut world) {
+        let mut activities = entity
+            .get::<Behavior>()
+            .unwrap()
             .activities
-            .iter()
-            .map(|a| a.score_cid)
+            .clone()
+            .into_iter()
             .collect::<Vec<_>>();
-        for score_cid in score_cids.iter() {
-            let score = entity.get_mut_by_id(*score_cid).unwrap().into_inner();
-            let untyped_score = unsafe { score.deref_mut::<UntypedScore>() };
-            untyped_score.scores = vec![];
+        for activity in activities.iter_mut() {
+            let activity_scores = entity
+                .get_mut_by_id(activity.score_cid)
+                .unwrap()
+                .into_inner();
+            let score_type = type_reg.get(activity.score_type_id).unwrap();
+            let reflect_score = score_type.data::<ReflectScore>().unwrap();
+            let reflect_from_ptr = score_type.data::<ReflectFromPtr>().unwrap();
+            let reflect = unsafe { reflect_from_ptr.as_reflect_mut(activity_scores) };
+            (reflect_score.reset_activity)(reflect);
         }
     }
 }
@@ -336,8 +391,8 @@ mod tests {
 
     use super::*;
 
-    #[derive(Component, Reflect, Default, Hash, Debug)]
-    #[reflect(Component)] // todo: remove for bevy 0.15
+    #[derive(Component, Reflect, Default, Hash, Debug, PartialEq)]
+    #[reflect(Component, PartialEq)] // todo: remove for bevy 0.15
     struct Idle;
 
     fn score_idle(mut query: Query<&mut Score<Idle>>) {
@@ -346,8 +401,8 @@ mod tests {
         }
     }
 
-    #[derive(Component, Reflect, Default, Hash, Debug)]
-    #[reflect(Component)] // todo: remove for bevy 0.15
+    #[derive(Component, Reflect, Default, Hash, Debug, PartialEq)]
+    #[reflect(Component, PartialEq)] // todo: remove for bevy 0.15
     struct Pursue;
 
     fn score_pursue(mut query: Query<&mut Score<Pursue>>) {

@@ -1,6 +1,7 @@
 use bevy::prelude::*;
 
 #[derive(Debug, Default, Reflect, Clone, Copy, PartialEq)]
+#[repr(C)]
 pub enum Response {
     #[default]
     Identity,
