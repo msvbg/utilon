@@ -153,13 +153,14 @@ fn pick_maximum(mut world: &mut World) {
 
         if let Some(max_activity) = max_activity {
             let mut behavior = entity.get_mut::<Behavior>().unwrap();
-            if let ActivityState::Running(current_activity) = &behavior.current_activity {
-                if !matches!(
-                    current_activity.reflect_partial_eq(max_activity.as_ref()),
-                    Some(true)
-                ) {
-                    behavior.next_activity = Some(max_activity);
-                }
+            if let ActivityState::Running(_current_activity) = &behavior.current_activity {
+                // todo: reflected partial_eq is broken. find another way to avoid excess state transitions.
+                // if !matches!(
+                //     current_activity.reflect_partial_eq(max_activity.as_ref()),
+                //     Some(true)
+                // ) {
+                behavior.next_activity = Some(max_activity);
+                // }
             } else {
                 behavior.next_activity = Some(max_activity);
             }
