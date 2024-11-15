@@ -1,8 +1,9 @@
 use std::fmt::Debug;
-use std::hash::Hash;
+use std::hash::{Hash, Hasher};
 use std::{any::TypeId, sync::Arc};
 
 use bevy::reflect::{FromType, ReflectFromPtr};
+use bevy::utils::HashMap;
 use bevy::{
     ecs::{
         component::ComponentId,
@@ -30,7 +31,7 @@ pub mod prelude {
 #[reflect(Component, Default, Score)]
 pub struct Score<A: Activity> {
     #[reflect(ignore)]
-    scores: Vec<(Box<dyn Reflect>, f32)>,
+    scores: HashMap<ActivityHash, (Box<dyn Reflect>, f32)>,
     response: Response,
 
     #[reflect(ignore)]
@@ -46,9 +47,21 @@ impl<A: Activity + Debug> std::fmt::Debug for Score<A> {
     }
 }
 
+type ActivityHash = u64;
+
+fn hash_activity<A: Activity>(activity: &A) -> ActivityHash {
+    use std::collections::hash_map::DefaultHasher;
+
+    let mut hasher = DefaultHasher::new();
+    TypeId::of::<A>().hash(&mut hasher);
+    activity.hash(&mut hasher);
+    hasher.finish() & 0xFFFF_FFFF
+}
+
 #[derive(Clone, Debug)]
 pub struct ReflectScore {
-    max_score: for<'a> fn(value: &'a dyn Reflect) -> Option<(Box<dyn Reflect>, f32)>,
+    max_score:
+        for<'a> fn(value: &'a dyn Reflect) -> Option<(ActivityHash, (&'a Box<dyn Reflect>, f32))>,
     reset_activity: for<'a> fn(value: &'a mut dyn Reflect),
 }
 
@@ -60,9 +73,8 @@ impl<A: Activity> FromType<Score<A>> for ReflectScore {
                     activity
                         .scores
                         .iter()
-                        .map(|(a, s)| (a, activity.response.eval(*s)))
-                        .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap())
-                        .map(|(a, s)| (a.clone_value(), s))
+                        .map(|(&hash, (a, s))| (hash, (a, activity.response.eval(*s))))
+                        .max_by(|(_, (_, a)), (_, (_, b))| a.partial_cmp(b).unwrap())
                 })
             },
             reset_activity: |value| {
@@ -86,7 +98,8 @@ impl<A: Activity> Default for Score<A> {
 
 impl<A: Activity> Score<A> {
     pub fn score(&mut self, activity: A, mut score: impl FnMut() -> f32) {
-        self.scores.push((Box::new(activity), score()));
+        self.scores
+            .insert(hash_activity(&activity), (Box::new(activity), score()));
     }
 }
 
@@ -99,7 +112,7 @@ impl<A> Activity for A where A: Default + Component + Reflect + GetTypeRegistrat
 pub struct Behavior {
     activities: Vec<ActivityId>,
     current_activity: ActivityState<Box<dyn Reflect>>,
-    next_activity: Option<Box<dyn Reflect>>,
+    next_activity: Option<(Box<dyn Reflect>, ActivityHash)>,
 }
 
 #[derive(Clone, Debug)]
@@ -124,6 +137,7 @@ fn pick_maximum(mut world: &mut World) {
         let behavior = entity.get::<Behavior>().unwrap();
         let mut max = f32::NEG_INFINITY;
         let mut max_activity = None;
+        let mut max_hash = 0;
         for activity in behavior.activities.iter() {
             let Some(score_ptr) = entity.get_by_id(activity.score_cid) else {
                 warn!("Activity {:?} has no Score", activity.score_cid);
@@ -135,26 +149,23 @@ fn pick_maximum(mut world: &mut World) {
             let reflect = unsafe { reflect_from_ptr.as_reflect(score_ptr) };
 
             let score = (reflect_score.max_score)(reflect);
-            if let Some(score) = score {
-                if score.1 > max {
-                    max_activity = Some(score.0.clone_value());
-                    max = score.1;
+            if let Some((_hash, (activity, score))) = score {
+                if score > max {
+                    max_activity = Some(activity.clone_value());
+                    max = score;
+                    max_hash = _hash;
                 }
             }
         }
 
         if let Some(max_activity) = max_activity {
             let mut behavior = entity.get_mut::<Behavior>().unwrap();
-            if let ActivityState::Running(_current_activity) = &behavior.current_activity {
-                // todo: reflected partial_eq is broken. find another way to avoid excess state transitions.
-                // if !matches!(
-                //     current_activity.reflect_partial_eq(max_activity.as_ref()),
-                //     Some(true)
-                // ) {
-                behavior.next_activity = Some(max_activity);
-                // }
+            if let ActivityState::Running(_current_activity, hash) = &behavior.current_activity {
+                if hash != &max_hash {
+                    behavior.next_activity = Some((max_activity, max_hash));
+                }
             } else {
-                behavior.next_activity = Some(max_activity);
+                behavior.next_activity = Some((max_activity, max_hash));
             }
         }
     }
@@ -291,9 +302,9 @@ impl EntityCommand for BuildBehaviorCommand {
 pub enum ActivityState<A> {
     #[default]
     None,
-    Running(A),
-    Success(A),
-    Failure(A),
+    Running(A, ActivityHash),
+    Success(A, ActivityHash),
+    Failure(A, ActivityHash),
 }
 
 #[derive(Event)]
@@ -310,8 +321,8 @@ fn transition_activity_states(
     mut behaviors: Query<(Entity, &mut Behavior)>,
 ) {
     for (entity, mut behavior) in behaviors.iter_mut() {
-        if let Some(next_activity) = &behavior.next_activity {
-            if let ActivityState::Running(current) = &behavior.current_activity {
+        if let Some((next_activity, next_hash)) = &behavior.next_activity {
+            if let ActivityState::Running(current, _) = &behavior.current_activity {
                 let removed = current
                     .get_represented_type_info()
                     .map(|t| t.type_path())
@@ -328,25 +339,26 @@ fn transition_activity_states(
                 "Inserted activity {:?} into entity {:?}",
                 next_activity, entity
             );
-            behavior.current_activity = ActivityState::Running(next_activity.clone_value());
+            behavior.current_activity =
+                ActivityState::Running(next_activity.clone_value(), *next_hash);
             behavior.next_activity = None;
         } else {
             match &behavior.current_activity {
-                ActivityState::Success(current) => {
+                ActivityState::Success(current, _) => {
                     commands
                         .entity(entity)
                         .remove_reflect(current.reflect_type_path().to_owned());
                     behavior.current_activity = ActivityState::None;
                     commands.trigger_targets(OnSuccess, entity);
                 }
-                ActivityState::Failure(current) => {
+                ActivityState::Failure(current, _) => {
                     commands
                         .entity(entity)
                         .remove_reflect(current.reflect_type_path().to_owned());
                     behavior.current_activity = ActivityState::None;
                     commands.trigger_targets(OnFailure, entity);
                 }
-                ActivityState::Running(_) | ActivityState::None => {}
+                ActivityState::Running(_, _) | ActivityState::None => {}
             }
         }
     }
@@ -384,8 +396,8 @@ mod tests {
 
     use super::*;
 
-    #[derive(Component, Reflect, Default, Hash, Debug, PartialEq)]
-    #[reflect(Component, PartialEq)] // todo: remove for bevy 0.15
+    #[derive(Component, Reflect, Default, Hash, Debug)]
+    #[reflect(Component)] // todo: remove for bevy 0.15
     struct Idle;
 
     fn score_idle(mut query: Query<&mut Score<Idle>>) {
@@ -394,8 +406,8 @@ mod tests {
         }
     }
 
-    #[derive(Component, Reflect, Default, Hash, Debug, PartialEq)]
-    #[reflect(Component, PartialEq)] // todo: remove for bevy 0.15
+    #[derive(Component, Reflect, Default, Hash, Debug)]
+    #[reflect(Component)] // todo: remove for bevy 0.15
     struct Pursue;
 
     fn score_pursue(mut query: Query<&mut Score<Pursue>>) {
@@ -429,5 +441,18 @@ mod tests {
             w.query::<&Behavior>().single(&w).next_activity.is_none(),
             true
         );
+    }
+
+    #[test]
+    fn activities_distinct_hashes() {
+        assert_ne!(hash_activity(&Idle), hash_activity(&Pursue));
+
+        #[derive(Component, Reflect, Default, Hash, Debug)]
+        #[reflect(Component)] // todo: remove for bevy 0.15
+        struct A {
+            a: u32,
+        }
+
+        assert_ne!(hash_activity(&A { a: 0 }), hash_activity(&A { a: 1 }));
     }
 }
