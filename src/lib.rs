@@ -74,14 +74,6 @@ impl<A: Activity> FromType<Score<A>> for ReflectScore {
     }
 }
 
-#[derive(Reflect)]
-#[repr(C)]
-struct UntypedScore {
-    #[reflect(ignore)]
-    scores: Vec<(Box<dyn Reflect>, f32)>,
-    response: Response,
-}
-
 impl<A: Activity> Default for Score<A> {
     fn default() -> Self {
         Self {
@@ -410,32 +402,6 @@ mod tests {
         for mut scorer in query.iter_mut() {
             scorer.score(Pursue, || 1.0);
         }
-    }
-
-    #[test]
-    fn test_untyped_cast() {
-        assert_eq!(size_of::<UntypedScore>(), size_of::<Score<Idle>>());
-        assert_eq!(align_of::<UntypedScore>(), align_of::<Score<Idle>>());
-
-        let score = Score {
-            scores: vec![(Box::new(Idle), 42.0), (Box::new(Idle), 13.0)],
-            response: Response::Sigmoid {
-                steepness: 2.0,
-                center: 3.0,
-            },
-            _marker: std::marker::PhantomData::<Idle>,
-        };
-
-        let untyped = unsafe {
-            (&score as *const _ as *const UntypedScore)
-                .as_ref()
-                .unwrap()
-        };
-        assert_eq!(
-            untyped.scores.iter().map(|(_, s)| *s).collect::<Vec<_>>(),
-            score.scores.iter().map(|(_, s)| *s).collect::<Vec<_>>()
-        );
-        assert_eq!(untyped.response, score.response);
     }
 
     #[test]
