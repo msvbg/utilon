@@ -97,9 +97,10 @@ impl<A: Activity> Default for Score<A> {
 }
 
 impl<A: Activity> Score<A> {
-    pub fn score(&mut self, activity: A, mut score: impl FnMut() -> f32) {
+    pub fn score(&mut self, mut score: impl FnMut() -> (f32, A)) {
+        let (score, activity) = score();
         self.scores
-            .insert(hash_activity(&activity), (Box::new(activity), score()));
+            .insert(hash_activity(&activity), (Box::new(activity), score));
     }
 }
 
@@ -178,7 +179,7 @@ pub struct UtilonPlugin {
 impl Default for UtilonPlugin {
     fn default() -> Self {
         Self {
-            schedule: PostUpdate.intern(),
+            schedule: Update.intern(),
         }
     }
 }
@@ -194,7 +195,7 @@ pub struct TransitionSet;
 
 impl Plugin for UtilonPlugin {
     fn build(&self, app: &mut App) {
-        app.configure_sets(self.schedule, (PrepareSet, ScoreSet, TransitionSet));
+        app.configure_sets(self.schedule, (PrepareSet, ScoreSet, TransitionSet).chain());
         app.add_systems(self.schedule, prepare_behaviors.in_set(PrepareSet));
         app.add_systems(
             self.schedule,
@@ -402,7 +403,7 @@ mod tests {
 
     fn score_idle(mut query: Query<&mut Score<Idle>>) {
         for mut scorer in query.iter_mut() {
-            scorer.score(Idle, || 0.0);
+            scorer.score(|| (0.0, Idle));
         }
     }
 
@@ -412,7 +413,7 @@ mod tests {
 
     fn score_pursue(mut query: Query<&mut Score<Pursue>>) {
         for mut scorer in query.iter_mut() {
-            scorer.score(Pursue, || 1.0);
+            scorer.score(|| (1.0, Pursue));
         }
     }
 
@@ -420,15 +421,13 @@ mod tests {
     fn basic_state_transition() {
         let mut app = App::new();
         app.add_plugins((MinimalPlugins, UtilonPlugin::default()));
-        app.add_systems(Update, (score_idle, score_pursue));
+        app.add_systems(Update, (score_idle, score_pursue).in_set(ScoreSet));
         app.world_mut().commands().spawn_empty().insert_behavior(
             BehaviorBuilder::new()
                 .with_activity::<Idle>(Response::Identity)
                 .with_activity::<Pursue>(Response::Identity),
         );
 
-        app.update();
-        app.world_mut().flush_commands();
         app.update();
 
         let w = app.world_mut();
