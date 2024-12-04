@@ -139,7 +139,7 @@ impl<A: Activity> Score<A> {
             }
         }
         self.scores
-            .retain(|_, entry| entry.ttl_ms.map_or(true, |ttl| ttl.get() > 0));
+            .retain(|_, entry| entry.ttl_ms.map_or(false, |ttl| ttl.get() > 0));
     }
 }
 
@@ -403,22 +403,20 @@ fn transition_activity_states(
     }
 }
 
-fn prepare_behaviors(mut world: &mut World) {
+fn advance_scores(mut world: &mut World, delta_ms: u32) {
     let mut behaviors = world.query_filtered::<EntityMut, With<Behavior>>();
     let type_registry = world.resource::<AppTypeRegistry>().clone();
     let type_reg = type_registry.read();
-    let time = world.resource::<Time>();
-    let delta_ms = (time.delta_seconds_f64() * 1000.0) as u32;
 
     for mut entity in behaviors.iter_mut(&mut world) {
-        let mut activities = entity
+        let activities = entity
             .get::<Behavior>()
             .unwrap()
             .activities
             .clone()
             .into_iter()
             .collect::<Vec<_>>();
-        for activity in activities.iter_mut() {
+        for activity in activities.iter() {
             let activity_scores = entity
                 .get_mut_by_id(activity.score_cid)
                 .unwrap()
@@ -430,6 +428,12 @@ fn prepare_behaviors(mut world: &mut World) {
             (reflect_score.reset_activity)(reflect, delta_ms);
         }
     }
+}
+
+fn prepare_behaviors(mut world: &mut World) {
+    let time = world.resource::<Time>();
+    let delta_ms = (time.delta_seconds_f64() * 1000.0) as u32;
+    advance_scores(&mut world, delta_ms);
 }
 
 #[cfg(test)]
@@ -447,7 +451,7 @@ mod tests {
 
     fn score_idle(mut query: Query<&mut Score<Idle>>) {
         for mut scorer in query.iter_mut() {
-            scorer.score(Idle, 0.0);
+            scorer.score(Idle, 0.5);
         }
     }
 
@@ -462,37 +466,6 @@ mod tests {
     fn score_pursue(mut query: Query<&mut Score<Pursue>>) {
         for mut scorer in query.iter_mut() {
             scorer.score(Pursue, 1.0);
-        }
-    }
-
-    #[derive(Component, Reflect, Default, Hash, Debug)]
-    #[reflect(Component)] // todo: remove for bevy 0.15
-    struct PonderKey;
-
-    #[derive(Component, Reflect, Default, Debug)]
-    #[reflect(Component)] // todo: remove for bevy 0.15
-    struct Ponder {
-        result: f32,
-    }
-
-    impl Activity for Ponder {
-        type Key = PonderKey;
-    }
-
-    fn score_ponder(mut query: Query<&mut Score<Ponder>>, mut counter: Local<u32>) {
-        for mut scorer in query.iter_mut() {
-            scorer.score_cached(10000, PonderKey, || {
-                if *counter > 0 {
-                    panic!("cached score was recalculated");
-                }
-                (
-                    (*counter as f32 + 1.0) % 2.0,
-                    Ponder {
-                        result: *counter as f32,
-                    },
-                )
-            });
-            *counter += 1;
         }
     }
 
@@ -536,6 +509,37 @@ mod tests {
 
     #[test]
     fn test_score_cached() {
+        #[derive(Component, Reflect, Default, Hash, Debug)]
+        #[reflect(Component)] // todo: remove for bevy 0.15
+        struct PonderKey;
+
+        #[derive(Component, Reflect, Default, Debug)]
+        #[reflect(Component)] // todo: remove for bevy 0.15
+        struct Ponder {
+            result: f32,
+        }
+
+        impl Activity for Ponder {
+            type Key = PonderKey;
+        }
+
+        fn score_ponder(mut query: Query<&mut Score<Ponder>>, mut counter: Local<u32>) {
+            for mut scorer in query.iter_mut() {
+                scorer.score_cached(10000, PonderKey, || {
+                    if *counter > 0 {
+                        panic!("cached score was recalculated");
+                    }
+                    (
+                        (0.9 / (*counter as f32 + 1.0)),
+                        Ponder {
+                            result: *counter as f32,
+                        },
+                    )
+                });
+                *counter += 1;
+            }
+        }
+
         let mut app = App::new();
         app.add_plugins((MinimalPlugins, UtilonPlugin::default()));
         app.add_systems(Update, (score_idle, score_ponder).in_set(ScoreSet));
@@ -552,5 +556,53 @@ mod tests {
         let (ponder, score) = w.query::<(&Ponder, &Score<Ponder>)>().single(&w);
         assert_eq!(ponder.result, 0.0);
         assert_eq!(score.scores.len(), 1);
+    }
+
+    #[test]
+    fn test_ttl_expiry() {
+        #[derive(Component, Reflect, Default, Hash, Debug)]
+        #[reflect(Component)] // todo: remove for bevy 0.15
+        struct PonderKey;
+
+        #[derive(Component, Reflect, Default, Debug)]
+        #[reflect(Component)] // todo: remove for bevy 0.15
+        struct Ponder {
+            result: f32,
+        }
+
+        impl Activity for Ponder {
+            type Key = PonderKey;
+        }
+
+        fn score_ponder(mut query: Query<&mut Score<Ponder>>, mut counter: Local<u32>) {
+            for mut scorer in query.iter_mut() {
+                scorer.score_cached(10000, PonderKey, || {
+                    let score = 0.9 / (*counter as f32 + 1.0);
+                    (
+                        score,
+                        Ponder {
+                            result: *counter as f32,
+                        },
+                    )
+                });
+                *counter += 1;
+            }
+        }
+
+        let mut app = App::new();
+        app.add_plugins((MinimalPlugins, UtilonPlugin::default()));
+        app.add_systems(Update, (score_idle, score_ponder).in_set(ScoreSet));
+        app.world_mut().commands().spawn_empty().insert_behavior(
+            BehaviorBuilder::new()
+                .with_activity::<Idle>(Response::Identity)
+                .with_activity::<Ponder>(Response::Identity),
+        );
+
+        app.update();
+        advance_scores(&mut app.world_mut(), 10001);
+        app.update();
+
+        let w = app.world_mut();
+        w.query::<(&Idle,)>().single(&w);
     }
 }
