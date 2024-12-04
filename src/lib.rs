@@ -1,5 +1,6 @@
 use std::fmt::Debug;
 use std::hash::{Hash, Hasher};
+use std::num::{NonZero, NonZeroU32};
 use std::{any::TypeId, sync::Arc};
 
 use bevy::reflect::{FromType, ReflectFromPtr};
@@ -31,11 +32,18 @@ pub mod prelude {
 #[reflect(Component, Default, Score)]
 pub struct Score<A: Activity> {
     #[reflect(ignore)]
-    scores: HashMap<ActivityHash, (Box<dyn Reflect>, f32)>,
+    scores: HashMap<ActivityHash, ScoreEntry>,
     response: Response,
 
     #[reflect(ignore)]
     _marker: std::marker::PhantomData<A>,
+}
+
+#[derive(Debug)]
+struct ScoreEntry {
+    activity: Box<dyn Reflect>,
+    score: f32,
+    ttl_ms: Option<NonZeroU32>,
 }
 
 impl<A: Activity + Debug> std::fmt::Debug for Score<A> {
@@ -49,20 +57,19 @@ impl<A: Activity + Debug> std::fmt::Debug for Score<A> {
 
 type ActivityHash = u64;
 
-fn hash_activity<A: Activity>(activity: &A) -> ActivityHash {
+fn hash_activity<K: Hash + 'static>(key: &K) -> ActivityHash {
     use std::collections::hash_map::DefaultHasher;
 
     let mut hasher = DefaultHasher::new();
-    TypeId::of::<A>().hash(&mut hasher);
-    activity.hash(&mut hasher);
+    TypeId::of::<K>().hash(&mut hasher);
+    key.hash(&mut hasher);
     hasher.finish() & 0xFFFF_FFFF
 }
 
 #[derive(Clone, Debug)]
 pub struct ReflectScore {
-    max_score:
-        for<'a> fn(value: &'a dyn Reflect) -> Option<(ActivityHash, (&'a Box<dyn Reflect>, f32))>,
-    reset_activity: for<'a> fn(value: &'a mut dyn Reflect),
+    max_score: for<'a> fn(value: &'a dyn Reflect) -> Option<(ActivityHash, &'a ScoreEntry)>,
+    reset_activity: for<'a> fn(value: &'a mut dyn Reflect, delta_ms: u32),
 }
 
 impl<A: Activity> FromType<Score<A>> for ReflectScore {
@@ -73,14 +80,14 @@ impl<A: Activity> FromType<Score<A>> for ReflectScore {
                     activity
                         .scores
                         .iter()
-                        .map(|(&hash, (a, s))| (hash, (a, activity.response.eval(*s))))
-                        .max_by(|(_, (_, a)), (_, (_, b))| a.partial_cmp(b).unwrap())
+                        .map(|(&hash, entry)| (hash, entry))
+                        .max_by(|(_, a), (_, b)| a.score.partial_cmp(&b.score).unwrap())
                 })
             },
-            reset_activity: |value| {
-                value
-                    .downcast_mut::<Score<A>>()
-                    .map(|activity| activity.scores.clear());
+            reset_activity: |value, delta_ms| {
+                if let Some(score) = value.downcast_mut::<Score<A>>() {
+                    score.reset(delta_ms);
+                }
             },
         }
     }
@@ -96,18 +103,49 @@ impl<A: Activity> Default for Score<A> {
     }
 }
 
-impl<A: Activity> Score<A> {
-    pub fn score(&mut self, mut score: impl FnMut() -> (f32, A)) {
-        let (score, activity) = score();
-        self.scores
-            .insert(hash_activity(&activity), (Box::new(activity), score));
+impl<A: Activity<Key = A> + Hash> Score<A> {
+    pub fn score(&mut self, activity: A, score: f32) {
+        self.scores.insert(
+            hash_activity(&activity),
+            ScoreEntry {
+                activity: Box::new(activity),
+                score,
+                ttl_ms: None,
+            },
+        );
     }
 }
 
-pub trait Activity: Default + Component + Reflect + GetTypeRegistration + TypePath + Hash {}
+impl<A: Activity> Score<A> {
+    pub fn score_cached(&mut self, ttl_ms: u32, key: A::Key, mut score: impl FnMut() -> (f32, A)) {
+        if self.scores.contains_key(&hash_activity(&key)) {
+            return;
+        }
+        let (score, activity) = score();
+        let entry = ScoreEntry {
+            activity: Box::new(activity),
+            score,
+            ttl_ms: NonZero::new(ttl_ms),
+        };
+        self.scores.insert(hash_activity(&key), entry);
+    }
 
-impl<A> Activity for A where A: Default + Component + Reflect + GetTypeRegistration + TypePath + Hash
-{}
+    /// Resets the TTL for each score entry by subtracting `delta_ms`.
+    /// Removes entries whose TTL has expired.
+    pub(crate) fn reset(&mut self, delta_ms: u32) {
+        for entry in self.scores.values_mut() {
+            if let Some(ttl) = entry.ttl_ms {
+                entry.ttl_ms = NonZero::new(ttl.get().saturating_sub(delta_ms));
+            }
+        }
+        self.scores
+            .retain(|_, entry| entry.ttl_ms.map_or(true, |ttl| ttl.get() > 0));
+    }
+}
+
+pub trait Activity: Default + Component + Reflect + GetTypeRegistration + TypePath {
+    type Key: Hash;
+}
 
 #[derive(Debug, Component, Default)]
 pub struct Behavior {
@@ -150,10 +188,10 @@ fn pick_maximum(mut world: &mut World) {
             let reflect = unsafe { reflect_from_ptr.as_reflect(score_ptr) };
 
             let score = (reflect_score.max_score)(reflect);
-            if let Some((_hash, (activity, score))) = score {
-                if score > max {
-                    max_activity = Some(activity.clone_value());
-                    max = score;
+            if let Some((_hash, entry)) = score {
+                if entry.score > max {
+                    max_activity = Some(entry.activity.clone_value());
+                    max = entry.score;
                     max_hash = _hash;
                 }
             }
@@ -369,6 +407,8 @@ fn prepare_behaviors(mut world: &mut World) {
     let mut behaviors = world.query_filtered::<EntityMut, With<Behavior>>();
     let type_registry = world.resource::<AppTypeRegistry>().clone();
     let type_reg = type_registry.read();
+    let time = world.resource::<Time>();
+    let delta_ms = (time.delta_seconds_f64() * 1000.0) as u32;
 
     for mut entity in behaviors.iter_mut(&mut world) {
         let mut activities = entity
@@ -387,7 +427,7 @@ fn prepare_behaviors(mut world: &mut World) {
             let reflect_score = score_type.data::<ReflectScore>().unwrap();
             let reflect_from_ptr = score_type.data::<ReflectFromPtr>().unwrap();
             let reflect = unsafe { reflect_from_ptr.as_reflect_mut(activity_scores) };
-            (reflect_score.reset_activity)(reflect);
+            (reflect_score.reset_activity)(reflect, delta_ms);
         }
     }
 }
@@ -401,9 +441,13 @@ mod tests {
     #[reflect(Component)] // todo: remove for bevy 0.15
     struct Idle;
 
+    impl Activity for Idle {
+        type Key = Idle;
+    }
+
     fn score_idle(mut query: Query<&mut Score<Idle>>) {
         for mut scorer in query.iter_mut() {
-            scorer.score(|| (0.0, Idle));
+            scorer.score(Idle, 0.0);
         }
     }
 
@@ -411,14 +455,49 @@ mod tests {
     #[reflect(Component)] // todo: remove for bevy 0.15
     struct Pursue;
 
+    impl Activity for Pursue {
+        type Key = Pursue;
+    }
+
     fn score_pursue(mut query: Query<&mut Score<Pursue>>) {
         for mut scorer in query.iter_mut() {
-            scorer.score(|| (1.0, Pursue));
+            scorer.score(Pursue, 1.0);
+        }
+    }
+
+    #[derive(Component, Reflect, Default, Hash, Debug)]
+    #[reflect(Component)] // todo: remove for bevy 0.15
+    struct PonderKey;
+
+    #[derive(Component, Reflect, Default, Debug)]
+    #[reflect(Component)] // todo: remove for bevy 0.15
+    struct Ponder {
+        result: f32,
+    }
+
+    impl Activity for Ponder {
+        type Key = PonderKey;
+    }
+
+    fn score_ponder(mut query: Query<&mut Score<Ponder>>, mut counter: Local<u32>) {
+        for mut scorer in query.iter_mut() {
+            scorer.score_cached(10000, PonderKey, || {
+                if *counter > 0 {
+                    panic!("cached score was recalculated");
+                }
+                (
+                    (*counter as f32 + 1.0) % 2.0,
+                    Ponder {
+                        result: *counter as f32,
+                    },
+                )
+            });
+            *counter += 1;
         }
     }
 
     #[test]
-    fn basic_state_transition() {
+    fn test_basic_state_transition() {
         let mut app = App::new();
         app.add_plugins((MinimalPlugins, UtilonPlugin::default()));
         app.add_systems(Update, (score_idle, score_pursue).in_set(ScoreSet));
@@ -443,7 +522,7 @@ mod tests {
     }
 
     #[test]
-    fn activities_distinct_hashes() {
+    fn test_activities_distinct_hashes() {
         assert_ne!(hash_activity(&Idle), hash_activity(&Pursue));
 
         #[derive(Component, Reflect, Default, Hash, Debug)]
@@ -453,5 +532,25 @@ mod tests {
         }
 
         assert_ne!(hash_activity(&A { a: 0 }), hash_activity(&A { a: 1 }));
+    }
+
+    #[test]
+    fn test_score_cached() {
+        let mut app = App::new();
+        app.add_plugins((MinimalPlugins, UtilonPlugin::default()));
+        app.add_systems(Update, (score_idle, score_ponder).in_set(ScoreSet));
+        app.world_mut().commands().spawn_empty().insert_behavior(
+            BehaviorBuilder::new()
+                .with_activity::<Idle>(Response::Identity)
+                .with_activity::<Ponder>(Response::Identity),
+        );
+
+        app.update();
+        app.update();
+
+        let w = app.world_mut();
+        let (ponder, score) = w.query::<(&Ponder, &Score<Ponder>)>().single(&w);
+        assert_eq!(ponder.result, 0.0);
+        assert_eq!(score.scores.len(), 1);
     }
 }
