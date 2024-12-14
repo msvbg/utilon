@@ -605,4 +605,63 @@ mod tests {
         let w = app.world_mut();
         w.query::<(&Idle,)>().single(&w);
     }
+
+    #[test]
+    fn complex_keys() {
+        #[derive(Hash)]
+        struct AttackKey {
+            player_id: u32,
+        }
+
+        #[derive(Component, Reflect, Default, Debug)]
+        #[reflect(Component)] // todo: remove for bevy 0.15
+        struct Attack {
+            player_id: u32,
+            angle: f32,
+        }
+
+        impl Activity for Attack {
+            type Key = AttackKey;
+        }
+
+        fn score_attack(mut query: Query<&mut Score<Attack>>) {
+            for mut scorer in query.iter_mut() {
+                scorer.score_cached(0, AttackKey { player_id: 0 }, || {
+                    (
+                        0.2,
+                        Attack {
+                            player_id: 0,
+                            angle: 0.0,
+                        },
+                    )
+                });
+                scorer.score_cached(0, AttackKey { player_id: 1 }, || {
+                    (
+                        0.8,
+                        Attack {
+                            player_id: 1,
+                            angle: 1.0,
+                        },
+                    )
+                });
+            }
+        }
+
+        let mut app = App::new();
+        app.add_plugins((MinimalPlugins, UtilonPlugin::default()));
+        app.add_systems(Update, (score_idle, score_attack).in_set(ScoreSet));
+        app.world_mut().commands().spawn_empty().insert_behavior(
+            BehaviorBuilder::new()
+                .with_activity::<Idle>(Response::Identity)
+                .with_activity::<Attack>(Response::Identity),
+        );
+
+        app.update();
+
+        let w = app.world_mut();
+        let (attack, score) = w.query::<(&Attack, &Score<Attack>)>().single(&w);
+        assert_eq!(attack.angle, 1.0);
+        assert_eq!(attack.player_id, 1);
+        assert_eq!(score.scores.len(), 2);
+    }
 }

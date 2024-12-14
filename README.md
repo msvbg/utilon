@@ -7,10 +7,7 @@ Utilon is a utility AI library for Bevy. It takes inspiration from [big_brain](h
 
 ## Design goals
 
-- Scoring should happen in ordinary user-defined Bevy systems to maximize performance and keep things idiomatic.
-- Behaviors live directly on actors, without any hierarchy.
-- Scores are calculated lazily and in sequence if a threshold score is specified, or eagerly and in parallel if asking for the maximum score.
+- Actions are components on entities, and there is no hierarchy or order of operations.
 - Scores can be cached automatically.
-- Scorers depend only on their component inputs and never on each other, avoiding all issues relating to hierarchy and order of operations.
-- State transitions are implemented automatically, and can optionally be hooked into if needed.
+- State transitions can be hooked into via observers, and are otherwise handled automatically.
 - Behaviors support both static and dynamic configuration. Response curves can be tweaked at runtime.
