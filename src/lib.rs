@@ -1,7 +1,7 @@
+use std::any::TypeId;
 use std::fmt::Debug;
 use std::hash::{Hash, Hasher};
 use std::num::{NonZero, NonZeroU32};
-use std::{any::TypeId, sync::Arc};
 
 use bevy::reflect::{FromType, ReflectFromPtr};
 use bevy::utils::HashMap;
@@ -150,8 +150,8 @@ pub trait Activity: Default + Component + Reflect + GetTypeRegistration + TypePa
 #[derive(Debug, Component, Default)]
 pub struct Behavior {
     activities: Vec<ActivityId>,
-    current_activity: ActivityState<Box<dyn Reflect>>,
-    next_activity: Option<(Box<dyn Reflect>, ActivityHash)>,
+    current_activity: ActivityState<Box<dyn PartialReflect>>,
+    next_activity: Option<(Box<dyn PartialReflect>, ActivityHash)>,
 }
 
 #[derive(Clone, Debug)]
@@ -178,7 +178,7 @@ fn pick_maximum(mut world: &mut World) {
         let mut max_activity = None;
         let mut max_hash = 0;
         for activity in behavior.activities.iter() {
-            let Some(score_ptr) = entity.get_by_id(activity.score_cid) else {
+            let Ok(score_ptr) = entity.get_by_id(activity.score_cid) else {
                 warn!("Activity {:?} has no Score", activity.score_cid);
                 continue;
             };
@@ -249,12 +249,10 @@ pub struct BehaviorBuilder {
 }
 
 struct ActivityDescriptor {
-    activity_type_id: TypeId,
     score_type_id: TypeId,
     activity_registration: TypeRegistration,
     score_registration: TypeRegistration,
-    make_activity: Box<dyn Fn() -> Arc<dyn Reflect> + Send>,
-    make_score: Box<dyn Fn() -> Box<dyn Reflect> + Send>,
+    make_score: Box<dyn Fn() -> Box<dyn PartialReflect> + Send>,
 }
 
 impl BehaviorBuilder {
@@ -266,11 +264,9 @@ impl BehaviorBuilder {
 
     pub fn with_activity<A: Activity>(mut self, response: Response) -> Self {
         self.activities.push(ActivityDescriptor {
-            activity_type_id: TypeId::of::<A>(),
             score_type_id: TypeId::of::<Score<A>>(),
             activity_registration: A::get_type_registration(),
             score_registration: Score::<A>::get_type_registration(),
-            make_activity: Box::new(move || Arc::new(A::default())),
             make_score: Box::new(move || {
                 Box::new(Score::<A> {
                     response,
@@ -288,7 +284,7 @@ pub trait InsertBehavior {
 
 impl<'a> InsertBehavior for EntityCommands<'a> {
     fn insert_behavior(&mut self, behavior: BehaviorBuilder) {
-        self.add(BuildBehaviorCommand { behavior });
+        self.queue(BuildBehaviorCommand { behavior });
     }
 }
 
@@ -308,27 +304,21 @@ impl EntityCommand for BuildBehaviorCommand {
             registry
                 .write()
                 .add_registration(desc.score_registration.clone());
-            // todo: uncomment when upgrading to bevy 0.15, and remove the
-            // flush_commands. also remove the cursed activity insert/remove below.
-            // let reflect_component = registration.data::<ReflectComponent>().unwrap();
-            // reflect_component.register_component(world);
-            world
-                .commands()
-                .entity(id)
-                .insert_reflect(desc.make_activity.as_ref()().clone_value());
+            let activity_component = desc
+                .activity_registration
+                .data::<ReflectComponent>()
+                .unwrap();
+            let activity_cid = activity_component.register_component(world);
+            let score_component = desc.score_registration.data::<ReflectComponent>().unwrap();
+            let score_cid = score_component.register_component(world);
             world
                 .commands()
                 .entity(id)
                 .insert_reflect(desc.make_score.as_ref()());
 
-            world.flush_commands();
-
-            let activity_cid = world.components().get_id(desc.activity_type_id).unwrap();
-            world.commands().entity(id).remove_by_id(activity_cid);
-
             behavior.activities.push(ActivityId {
                 activity_cid: activity_cid,
-                score_cid: world.components().get_id(desc.score_type_id).unwrap(),
+                score_cid: score_cid,
                 score_type_id: desc.score_type_id,
             });
         }
@@ -432,7 +422,7 @@ fn advance_scores(mut world: &mut World, delta_ms: u32) {
 
 fn prepare_behaviors(mut world: &mut World) {
     let time = world.resource::<Time>();
-    let delta_ms = (time.delta_seconds_f64() * 1000.0) as u32;
+    let delta_ms = (time.delta_secs_f64() * 1000.0) as u32;
     advance_scores(&mut world, delta_ms);
 }
 
